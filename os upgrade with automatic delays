@@ -1,0 +1,135 @@
+Code to upgrade the os of a device using ftp server and command list and device list file
+Make a Device_List.txt
+And store all the host ips 
+In this format-
+172.11.111111
+172.11.111112
+
+Example of Commands for os upgrade- 
+Make a Command_List.txt and write the get command with file location in ur ftp server
+ftp 172.31.251.22
+id
+pass
+binary
+get /storage/excitel-switches/IOS/5735V2/S5735-L-V2_V600R023C00SPC500.cc
+Y
+bye
+startup system-software S5735-L-V2_V600R023C00SPC500.cc
+save
+Y
+
+OS upgradation code – 
+import paramiko
+from datetime import datetime
+import concurrent.futures
+import time
+
+start_time = datetime.now()
+# Define the SSH connection parameters
+port = 22
+username = "user"
+password = "pass"
+# Read the list of commands from a file
+with open("Command_List.txt", "r") as c:
+    command_list = c.read().split("\n")
+# Read the list of devices from a file
+with open("Device_List.txt", "r") as d:
+    hosts = d.read().split("\n")
+# Create files to store error and success information
+authentication_failed_file = open("Authentication_failed.txt", "w")
+total_ips = len(hosts)
+# Function to execute SSH commands for a single IP
+def execute_ssh(ip):
+    try:
+        print("Try to login:", ip)
+        conn = paramiko.SSHClient()
+        conn.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        conn.connect(ip, port, username, password)
+        comm = conn.invoke_shell()
+        comm.send("s 0 t \n")
+        for command in command_list:
+            comm.send(f"{command}\n")
+            output = ""
+            if command.startswith("get"):
+                while True:
+                    output += comm.recv(65535).decode("utf-8")
+                    if "Error: Failed to run this command because of insufficient storage space." in output:
+                        with open("insufficient_storage.txt", "a") as storage_file:
+                            storage_file.write(f"Insufficient storage for {ip}: {command}\n")
+                        break
+                    elif "already exists but it is smaller than the remote file" in output:
+                        time.sleep(2)  # 2-second delay
+                        break
+                    elif "Please try a different file name" in output:
+                        break
+                    elif "same as the remote one. Overwrite it? [Y/N]:" in output:
+                        break
+                    elif "Transfer complete" in output:
+                        break
+            elif command.strip() == "Y":
+                while True:
+                    output += comm.recv(65535).decode("utf-8")
+                    if "Transfer complete" in output:
+                        break
+                    if "Error: Failed to run this command because of insufficient storage space." in output:
+                        with open("insufficient_storage.txt", "a") as storage_file:
+                            storage_file.write(f"Insufficient storage for {ip}: {command}\n")
+                        break
+                    elif "The size of file" in output:
+                        break
+                    elif "Save the configuration successfully" in output:
+                        break
+                    elif "Error: Unrecognized command found" in output:
+                        # Handle "Unrecognized command" error and break
+                        with open("error_Y_command.txt", "a") as error_file:
+                            error_file.write(f"Unrecognized command for {ip}: {command}\n")
+                        break
+            elif command.strip() == "bye":
+                while True:
+                    output += comm.recv(65535).decode("utf-8")
+                    if "Goodbye." in output:
+                        break
+            elif command.startswith("startup system-software"):
+                while True:
+                    time.sleep(20)  # 2-second delay
+                    break
+
+            elif command.strip() == "save":
+                while True:
+                    time.sleep(2)  # 2-second delay
+                    break
+            elif command.strip() == "Y":
+                while True:
+                    output += comm.recv(65535).decode("utf-8")
+                    if "Save the configuration successfully" in output:
+                        break
+                    elif "Error: Unrecognized command found" in output:
+                        # Handle "Unrecognized command" error and break
+                        with open("error_Y_command.txt", "a") as error_file:
+                            error_file.write(f"Unrecognized command for {ip}: {command}\n")
+                        break
+    except paramiko.AuthenticationException as e:
+        error_message = f"Authentication failed for {ip}: {e}\n"
+        print(error_message)
+        authentication_failed_file.write(error_message)
+    except paramiko.SSHException as e:
+        if "Unable to connect to port 22" in str(e):
+            return
+        else:
+            error_message = f"Device down for {ip}: {e}\n"
+            print(error_message)
+            with open("Device_down.txt", "a") as device_down_file:
+                device_down_file.write(error_message)
+    except Exception as ex:
+        error_message = f"An error occurred with {ip}: {ex}\n"
+        print(error_message)
+        with open("Device_down.txt", "a") as device_down_file:
+            device_down_file.write(error_message)
+    finally:
+        conn.close()
+# Run SSH connections concurrently
+with concurrent.futures.ThreadPoolExecutor() as executor:
+    results = executor.map(execute_ssh, hosts)
+# Record the end time and calculate the execution time
+end_time = datetime.now()
+print("Execution time:", end_time - start_time)
